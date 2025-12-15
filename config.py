@@ -61,8 +61,6 @@ class DataManager:
         Escreve JSON de forma ATÔMICA (Safe Write).
         1. Escreve num arquivo temporário.
         2. Renomeia para o arquivo final.
-        Isso previne que o arquivo fique corrompido se o bot desligar durante o salvamento
-        e previne erros de leitura enquanto o arquivo está sendo escrito.
         """
         dir_name = os.path.dirname(filepath)
         # Cria arquivo temporário na mesma pasta
@@ -84,8 +82,6 @@ class DataManager:
     async def save_guild_data(guild_id: str, filename: str, data: dict) -> None:
         """
         Salva dados de forma assíncrona.
-        NOTA: Use apenas se já tiver modificado os dados e quiser apenas persistir.
-        Para atualizações atómicas (Ler-Modificar-Salvar), use os métodos update_* abaixo.
         """
         lock = get_guild_lock(str(guild_id))
         path = DataManager.get_path(guild_id, filename)
@@ -104,14 +100,16 @@ def get_config(guild_id: str) -> dict:
         "setup": {
             "id_cargo_adm": None,
             "id_canal_comandos": None,
-            "id_canal_countdown": None
+            "id_canal_countdown": None,
+            "id_canal_aprovacao": None  # Novo: Canal para enviar embeds de aprovação
         },
         "connected_channels": {},
         "perms": {
             "extracao_canal": [],
             "extracao_tudo": [],    
             "reabrir": [],
-            "resolvido": []
+            "resolvido": [],
+            "aprovar": [] # Novo: Quem pode clicar no botão Aprovar/Reprovar
         }
     }
     return DataManager.load_json(str(guild_id), "config.json", default)
@@ -134,15 +132,12 @@ def get_setup_id(guild_id: int, key: str) -> int:
     return int(val) if val else None
 
 # --- FUNÇÕES DE ATUALIZAÇÃO SEGURA (CORRIGIDAS) ---
-# Agora o Lock cobre todo o ciclo: Leitura -> Modificação -> Escrita
-# Isso evita que duas ações simultâneas sobrescrevam dados uma da outra.
 
 async def update_config(guild_id: str, modification_callback):
     """Atualiza a configuração de um servidor atomicamente"""
     lock = get_guild_lock(str(guild_id))
     
     def _sync_update():
-        # Roda dentro do executor para não bloquear
         current = get_config(guild_id) # Lê
         new_data = modification_callback(current) # Modifica
         DataManager.save_sync(DataManager.get_path(guild_id, "config.json"), new_data) # Salva
@@ -166,10 +161,82 @@ async def update_categories(guild_id: str, modification_callback):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _sync_update)
 
+# --- GERENCIAMENTO DE PENDÊNCIAS (NOVO) ---
+
+async def log_pending_safe(guild_id: str, thread_id: int, thread_name: str, 
+                           resolvido_por: str, resolvido_por_id: int, 
+                           categoria: str, orgao: str, canal_origem: str) -> None:
+    """Adiciona um tópico à lista de pendências de aprovação"""
+    lock = get_guild_lock(str(guild_id))
+    
+    def _sync_log():
+        path = DataManager.get_path(guild_id, "pendencias.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                db = json.load(f)
+        except:
+            db = []
+        
+        # Cria entrada
+        new_data = {
+            "data_solicitacao": datetime.now(BRT_OFFSET).isoformat(),
+            "thread_id": str(thread_id),
+            "thread_nome": thread_name,
+            "canal_origem": canal_origem,
+            "resolvido_por": resolvido_por,
+            "resolvido_por_id": str(resolvido_por_id),
+            "orgao": orgao,
+            "categoria": categoria
+        }
+        
+        # Remove se já existir (atualização)
+        db = [entry for entry in db if entry.get("thread_id") != str(thread_id)]
+        db.append(new_data)
+        
+        DataManager.save_sync(path, db)
+
+    async with lock:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _sync_log)
+
+async def get_pending_data(guild_id: str, thread_id: int) -> dict:
+    """Recupera dados de uma pendência específica"""
+    path = DataManager.get_path(guild_id, "pendencias.json")
+    if not os.path.exists(path): return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            db = json.load(f)
+        return next((item for item in db if item["thread_id"] == str(thread_id)), None)
+    except:
+        return None
+
+async def remove_pending_safe(guild_id: str, thread_id: int) -> None:
+    """Remove um tópico da lista de pendências"""
+    lock = get_guild_lock(str(guild_id))
+    
+    def _sync_remove():
+        path = DataManager.get_path(guild_id, "pendencias.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                db = json.load(f)
+            
+            novo_db = [entry for entry in db if entry.get("thread_id") != str(thread_id)]
+            
+            if len(novo_db) < len(db):
+                DataManager.save_sync(path, novo_db)
+        except:
+            pass
+
+    async with lock:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _sync_remove)
+
+# --- GERENCIAMENTO DE RESOLUÇÕES (FINALIZADAS) ---
+
 async def log_resolution_safe(guild_id: str, thread_id: int, thread_name: str, 
                             resolvido_por: str, resolvido_por_id: int, 
                             categoria: str, orgao: str) -> None:
-    """Salva a resolução atomicamente"""
+    """Salva a resolução definitiva atomicamente (após aprovação)"""
     lock = get_guild_lock(str(guild_id))
     
     def _sync_log():
