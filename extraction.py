@@ -1,5 +1,6 @@
 """
 extraction.py - Motor de extração adaptado para Multi-Server (Guild Sharding)
+Atualizado: Arquivos agora são tratados como Links (sem download físico)
 """
 import discord
 from discord.ext import commands, tasks
@@ -68,9 +69,68 @@ async def finalizar_topico_logica(interaction, selections, guild_id):
     if interaction.response.is_done(): await interaction.edit_original_response(content=None, embed=embed, view=None)
     else: await interaction.response.edit_message(content=None, embed=embed, view=None)
     
-    # Tranca e Arquiva o tópico
-    try: await thread.edit(locked=True, archived=True, reason="Finalizado via Bot")
-    except: pass
+    # --- LÓGICA DE RENOMEAÇÃO E FECHAMENTO OTIMIZADA ---
+    try:
+        # 1. Calcula o novo nome
+        prefixes = ["OK - ", "OK ", "[OK] ", "[OK]", "(OK) ", "(OK)"]
+        new_name = thread.name
+        has_prefix = False
+        
+        for p in prefixes:
+            if new_name.startswith(p):
+                has_prefix = True
+                break
+                
+        if not has_prefix:
+            new_name = f"OK - {new_name}"
+        
+        # 2. Verifica se o nome REALMENTE mudou
+        name_changed = (new_name != thread.name)
+
+        # 3. Verifica se já está arquivado (Evita erro 50083)
+        if thread.archived:
+            await thread.edit(locked=True, archived=True)
+            return
+
+        # 4. Executa a Ação com Proteção de Timeout (5 segundos)
+        if name_changed:
+            try:
+                # Tenta Renomear + Trancar + Arquivar
+                # Se demorar mais que 5s (Rate Limit), o asyncio cancela e vai pro except
+                await asyncio.wait_for(thread.edit(
+                    name=new_name,
+                    locked=True,
+                    archived=True,
+                    reason="Finalizado via Bot"
+                ), timeout=5.0)
+            except asyncio.TimeoutError:
+                # Rate limit detectado! Desiste de renomear e só tranca.
+                print(f"⚠️ Rate Limit no tópico {thread.name}. Aplicando fallback (sem renomear).")
+                
+                # --- AVISO NO CHAT (Plano B) ---
+                try:
+                    await thread.send("⚠️ **Aviso de Limite:** O Discord impediu a renomeação deste tópico (Rate Limit). Por favor, **adicione o 'OK' manualmente**.")
+                except: pass
+                # -------------------------------
+
+                await thread.edit(
+                    locked=True,
+                    archived=True,
+                    reason="Finalizado via Bot (Fallback Rate Limit)"
+                )
+        else:
+            # Só Trancar + Arquivar (Sem tocar no nome)
+            await thread.edit(
+                locked=True,
+                archived=True,
+                reason="Finalizado via Bot"
+            )
+        
+    except Exception as e:
+        print(f"Erro ao finalizar (Geral): {e}")
+        try:
+            await thread.edit(locked=True, archived=True, reason="Finalizado via Bot (Fallback)")
+        except: pass
 
 # --- EVENTOS DO BOT (RESTAURO DE FUNCIONALIDADE) ---
 def setup_events(bot):
@@ -102,25 +162,41 @@ def setup_events(bot):
 
 class ExtractionEngine:
     @staticmethod
-    def gerar_texto_toon(contexto: dict, mensagens: list, pasta_ref: str) -> str:
-        """Gera texto formatado para arquivamento"""
+    def gerar_texto_toon(contexto: dict, mensagens: list) -> str:
+        """Gera texto formatado. Imagens e arquivos viram links."""
         lines = ["contexto:"] + [f"  {k}: {v}" for k, v in contexto.items()]
         if mensagens:
             lines.append(f"mensagens[{len(mensagens)}]{{data,autor,mensagem}}:")
             for m in mensagens:
                 txt = m['conteudo'].replace('\n', ' ')
-                anexos = " ".join([f"[ANEXO: {os.path.basename(a)}]" for a in m['anexos']])
-                full = f"{txt} {anexos}".strip()
+                
+                # Formatação de anexos (agora sempre links)
+                anexos_formatados = []
+                for a in m['anexos']:
+                    # Tenta detectar se é imagem visualmente pela URL (apenas para a tag no texto)
+                    # Se tiver extensão de imagem, usa [IMAGEM], senão [ARQUIVO]
+                    # Nota: 'a' agora é sempre uma URL
+                    is_img = any(ext in a.lower() for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'])
+                    tag = "IMAGEM" if is_img else "ARQUIVO"
+                    
+                    anexos_formatados.append(f"[{tag}: {a}]")
+                
+                anexos_str = " ".join(anexos_formatados)
+                full = f"{txt} {anexos_str}".strip()
                 lines.append(f"  {m['timestamp_brt']}, {m['autor']['nome']}, {full}")
         return "\n".join(lines)
 
     @staticmethod
     async def extrair_topico(bot, session, thread, pasta_destino, guild_id):
-        """Extrai um único tópico e seus anexos"""
+        """
+        Extrai um tópico.
+        - Salva apenas LINKS para imagens e arquivos.
+        - Não realiza download físico de anexos.
+        """
         nome = clean_name(thread.name)
-        pasta_anexos = os.path.join(pasta_destino, f"anexos_{nome}")
+        # pasta_anexos removida, pois não baixaremos mais arquivos físicos
+        
         msgs = []
-        tem_anexos = False
         
         # Tenta recuperar metadados da resolução (Orgão/Categoria)
         try:
@@ -136,32 +212,30 @@ class ExtractionEngine:
 
         # Itera mensagens
         async for m in thread.history(limit=None, oldest_first=True):
-            if m.author.id == bot.user.id and "Chamado Finalizado!" in m.content: continue
-            paths = []
+            # Ignora mensagens do próprio BOT
+            if m.author.id == bot.user.id: 
+                continue
+            
+            paths_or_links = []
             if m.attachments:
-                tem_anexos = True
-                os.makedirs(pasta_anexos, exist_ok=True)
                 for a in m.attachments:
-                    p = os.path.join(pasta_anexos, f"{a.id}_{a.filename}")
-                    if not os.path.exists(p):
-                        try:
-                            async with session.get(a.url) as r:
-                                if r.status == 200:
-                                    with open(p, 'wb') as f: f.write(await r.read())
-                        except: pass
-                    paths.append(p)
+                    # ALTERAÇÃO: Agora pegamos SEMPRE a URL, independente se é imagem ou arquivo
+                    paths_or_links.append(a.url)
+
             msgs.append({
                 "timestamp_brt": m.created_at.astimezone(BRT_OFFSET).strftime("%Y-%m-%d %H:%M:%S"),
                 "autor": {"nome": m.author.name},
                 "conteudo": m.content,
-                "anexos": paths
+                "anexos": paths_or_links
             })
 
         if msgs:
             ctx = {"origem": thread.parent.name if thread.parent else "N/A", "nome": thread.name, "orgao": orgao_val, "categoria": cat, "id": str(thread.id)}
+            
+            # Salva apenas o arquivo de texto
             with open(os.path.join(pasta_destino, f"topico_{nome}.txt"), "w", encoding="utf-8") as f:
-                f.write(ExtractionEngine.gerar_texto_toon(ctx, msgs, f"anexos_{nome}" if tem_anexos else None))
-            if tem_anexos and not os.listdir(pasta_anexos): os.rmdir(pasta_anexos)
+                f.write(ExtractionEngine.gerar_texto_toon(ctx, msgs))
+            
             return True
         return False
 
@@ -187,6 +261,7 @@ async def perform_extraction_guild(bot, guild_id: str, target_channels=None, for
     stats = {"canais": 0, "topicos": 0}
     extracted = False
 
+    # Mantemos a sessão caso precisemos no futuro, mas extrair_topico não baixa mais nada
     async with aiohttp.ClientSession() as session:
         for ch in channels_obj:
             cid = str(ch.id)
@@ -195,7 +270,6 @@ async def perform_extraction_guild(bot, guild_id: str, target_channels=None, for
             pasta_ch = os.path.join(raiz, clean_name(ch.name))
             
             # Processa Threads Arquivadas
-            # Verifica se o bot tem permissão de ver histórico e threads
             try:
                 threads = [t async for t in ch.archived_threads(limit=None)]
             except:
@@ -210,6 +284,8 @@ async def perform_extraction_guild(bot, guild_id: str, target_channels=None, for
                 if last_ts and t.archive_timestamp.astimezone(BRT_OFFSET) <= last_ts.astimezone(BRT_OFFSET): continue
                 
                 os.makedirs(pasta_ch, exist_ok=True)
+                
+                # Passa a sessão para o motor de extração
                 if await ExtractionEngine.extrair_topico(bot, session, t, pasta_ch, guild_id):
                     cnt += 1
                     extracted = True
@@ -405,10 +481,50 @@ def setup_commands(bot):
         thread = interaction.channel
         if not isinstance(thread, discord.Thread): return await interaction.response.send_message("Use num tópico.", ephemeral=True)
         
+        # 1. Deferir (Avisar o Discord que estamos processando) para evitar erro de timeout
+        await interaction.response.defer()
+
         await apagar_mensagens_antigas_bot(bot, thread, "Chamado Finalizado!")
         await remove_resolution(str(interaction.guild.id), thread.id)
+        
         try:
-            await thread.edit(locked=False, archived=False, reason=f"Reaberto por {interaction.user.name}")
-            await interaction.response.send_message("🔓 Tópico Reaberto!")
+            # 2. Lógica para remover variações de OK
+            new_name = thread.name
+            prefixes = ["OK - ", "OK ", "[OK] ", "[OK]", "(OK) ", "(OK)"]
+            for p in prefixes:
+                if new_name.startswith(p):
+                    # Remove o prefixo e remove espaços extras do início (strip)
+                    new_name = new_name[len(p):].strip()
+                    break
+            
+            # Verifica se o nome REALMENTE mudou antes de enviar o request
+            if new_name != thread.name:
+                try:
+                    # Tenta Renomear + Destrancar com timeout (5 segundos)
+                    await asyncio.wait_for(thread.edit(
+                        name=new_name, 
+                        locked=False, 
+                        archived=False, 
+                        reason=f"Reaberto por {interaction.user.name}"
+                    ), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # Fallback: Só destranca se o renomear travar
+                    await thread.edit(
+                        locked=False, 
+                        archived=False, 
+                        reason=f"Reaberto por {interaction.user.name} (Fallback)"
+                    )
+                    await interaction.followup.send("🔓 Tópico Reaberto! (Nome mantido por limite do Discord)")
+                    return
+            else:
+                # Se NÃO mudou, só destranca e desarquiva (Economiza rate limit)
+                await thread.edit(
+                    locked=False, 
+                    archived=False, 
+                    reason=f"Reaberto por {interaction.user.name}"
+                )
+            
+            await interaction.followup.send("🔓 Tópico Reaberto!")
+            
         except Exception as e:
-            await interaction.response.send_message(f"Erro: {e}", ephemeral=True)
+            await interaction.followup.send(f"⚠️ Reaberto, mas com erro (Rate Limit?): {e}")

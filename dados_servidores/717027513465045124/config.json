@@ -1,0 +1,18 @@
+{
+    "setup": {
+        "id_cargo_adm": 717106531879092254,
+        "id_canal_comandos": 1447595319725527202,
+        "id_canal_countdown": 1447595481726320662
+    },
+    "connected_channels": {
+        "1280961842587500556": {
+            "last_marker_timestamp": "2025-12-09T14:14:58.241868-03:00"
+        }
+    },
+    "perms": {
+        "extracao_canal": [],
+        "extracao_tudo": [],
+        "reabrir": [],
+        "resolvido": []
+    }
+}

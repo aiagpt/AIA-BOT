@@ -1,6 +1,6 @@
 """
 ui_components.py - Interface completa adaptada para Multi-Server
-Restaura todas as funcionalidades originais (Permissões, Gerenciamento, Backup) com isolamento de dados.
+Inclui seletor de extração manual e gerenciamento.
 """
 import discord
 from discord import ui
@@ -47,6 +47,60 @@ class BaseSelectionView(BaseView):
             embed=build_dashboard_embed(self.bot, self.guild_id),
             view=PainelGerenciamento(self.bot, self.guild_id)
         )
+
+# --- VIEW DE EXTRAÇÃO MANUAL (NOVO) ---
+class ExtractionChannelSelectView(BaseView):
+    """Menu para selecionar qual canal conectado extrair"""
+    def __init__(self, bot_instance, guild_id, connected_channels_ids):
+        super().__init__(bot_instance)
+        self.guild_id = str(guild_id)
+        self.channel_ids = connected_channels_ids
+        
+        # Cria as opções do Select com base nos canais conectados
+        options = []
+        for cid in self.channel_ids:
+            ch = bot_instance.get_channel(int(cid))
+            if ch:
+                # Limita nome a 25 chars (segurança visual)
+                label = f"#{ch.name}"[:25]
+                options.append(discord.SelectOption(label=label, value=str(cid), emoji="📂"))
+            else:
+                # Canal deletado ou bot sem acesso, mas ainda na config
+                options.append(discord.SelectOption(label=f"ID: {cid} (Inválido)", value=str(cid), emoji="⚠️"))
+        
+        if not options:
+            options.append(discord.SelectOption(label="Nenhum canal encontrado", value="none"))
+
+        # Limita a 25 opções (limite do discord)
+        select = ui.Select(placeholder="Selecione o canal para extrair...", options=options[:25], min_values=1, max_values=1)
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        selected_id = interaction.data['values'][0]
+        if selected_id == "none":
+            await interaction.response.send_message("Nenhum canal válido.", ephemeral=True)
+            return
+
+        # Importação tardia para evitar ciclo de importação
+        from extraction import perform_extraction_guild
+        
+        await interaction.response.defer() # Mostra "pensando..."
+        
+        ch = self.bot.get_channel(int(selected_id))
+        if not ch:
+             await interaction.followup.send(f"❌ Erro: O canal ID {selected_id} não foi encontrado (pode ter sido deletado).", ephemeral=True)
+             return
+
+        # Executa a extração APENAS para o canal alvo
+        stats, zip_path = await perform_extraction_guild(self.bot, self.guild_id, target_channels=[ch])
+        
+        if zip_path:
+            await interaction.followup.send(f"📦 **Backup Manual: {ch.name}**\nForam extraídos {stats['topicos']} tópicos.", file=discord.File(zip_path))
+            import os
+            os.remove(zip_path)
+        else:
+            await interaction.followup.send(f"✅ **{ch.name}**: Nenhum tópico novo ou resolvido para extrair.")
 
 # --- SETUP INICIAL ---
 class PainelSetup(ui.View):
