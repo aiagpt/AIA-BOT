@@ -1,6 +1,5 @@
 """
 main.py - Arquivo principal do bot AMANDa (Multi-Server)
-Responsável por inicializar o bot, carregar extensões e gerir o ciclo de vida.
 """
 import discord
 from discord.ext import commands
@@ -9,7 +8,6 @@ import traceback
 from dotenv import load_dotenv
 
 # Importações dos módulos locais
-# Adicionamos setup_events aqui e removemos importações antigas
 from extraction import setup_commands, setup_events, set_bot, daily_extraction_loop, update_countdown_loop
 
 # Carrega variáveis de ambiente (.env)
@@ -17,10 +15,10 @@ load_dotenv()
 
 # --- CONFIGURAÇÃO DO BOT ---
 intents = discord.Intents.default()
-intents.guilds = True           # Necessário para gerir servidores
-intents.messages = True         # Necessário para ler mensagens
-intents.message_content = True  # Necessário para ler conteúdo de mensagens (comandos)
-intents.members = True          # Necessário para verificar cargos/membros
+intents.guilds = True           
+intents.messages = True         
+intents.message_content = True  
+intents.members = True          
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -30,7 +28,6 @@ async def on_ready():
     """Executado quando o bot fica online"""
     print(f"🚀 Bot iniciado como: {bot.user}")
     print(f"🆔 ID do Bot: {bot.user.id}")
-    print("📦 Estrutura Multi-Server carregada e pronta.")
     
     # Sincroniza comandos Slash (App Commands) com o Discord
     try:
@@ -40,7 +37,7 @@ async def on_ready():
         print(f"❌ Erro ao sincronizar comandos: {e}")
         traceback.print_exc()
         
-    # Inicia loops de background (se já não estiverem a correr)
+    # Inicia loops de background
     if not daily_extraction_loop.is_running():
         daily_extraction_loop.start()
         print("⏰ Loop de extração diária iniciado.")
@@ -52,29 +49,24 @@ async def on_ready():
 # --- FUNÇÃO PRINCIPAL ---
 def main():
     """Função de entrada"""
-    
-    # 1. Define a referência global do bot no módulo de extração
+    # Define a referência do bot no módulo extraction
     set_bot(bot)
     
-    # 2. Configura eventos (on_message para bloquear tópicos trancados)
+    # Configura eventos e comandos
     setup_events(bot)
-    
-    # 3. Registra os comandos (Slash Commands)
     setup_commands(bot)
     
-    # 4. Obtém token do arquivo .env
     token = os.getenv('DISCORD_TOKEN')
     if not token:
         print("\n❌ ERRO CRÍTICO: Token não encontrado!")
         print("Crie um arquivo chamado '.env' na raiz com o conteúdo: DISCORD_TOKEN=seutokenaqui")
         return
     
-    # 5. Executa o bot
     print("🔄 A conectar ao Discord...")
     try:
         bot.run(token)
     except KeyboardInterrupt:
-        print("\n⚠️ Bot interrompido pelo utilizador (Ctrl+C).")
+        print("\n⚠️ Bot interrompido pelo utilizador.")
     except discord.LoginFailure:
         print("\n❌ Erro de Login: O token fornecido é inválido.")
     except Exception as e:

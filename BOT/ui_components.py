@@ -13,8 +13,8 @@ from config import (
 
 # --- CLASSES BASE ---
 class BaseView(ui.View):
-    def __init__(self, bot_instance):
-        super().__init__(timeout=None)
+    def __init__(self, bot_instance, timeout=None):
+        super().__init__(timeout=timeout)
         self.bot = bot_instance
 
 class BaseSelectionView(BaseView):
@@ -48,7 +48,31 @@ class BaseSelectionView(BaseView):
             view=PainelGerenciamento(self.bot, self.guild_id)
         )
 
-# --- VIEW DE EXTRAÇÃO MANUAL (NOVO) ---
+# --- VIEW DE APROVAÇÃO (CORRIGIDO) ---
+class ApprovalView(BaseView):
+    """View anexada à mensagem no canal de aprovações"""
+    def __init__(self, bot_instance, guild_id, thread_id, thread_url):
+        super().__init__(bot_instance, timeout=None) # Persistente enquanto o bot roda
+        self.guild_id = str(guild_id)
+        self.thread_id = str(thread_id)
+        
+        # Adiciona o botão de Link manualmente na inicialização
+        # Isso evita o erro 50035 (Conflito entre custom_id e url no decorator)
+        if thread_url:
+            self.add_item(ui.Button(label="Ir ao Tópico", style=discord.ButtonStyle.link, emoji="🔗", url=thread_url))
+
+    @ui.button(label="Aprovar", style=discord.ButtonStyle.success, emoji="✅", custom_id="btn_aprovar")
+    async def btn_aprovar(self, interaction: discord.Interaction, button: ui.Button):
+        # Importação tardia para evitar ciclo de importação
+        from extraction import confirmar_aprovacao
+        await confirmar_aprovacao(self.bot, interaction, self.guild_id, self.thread_id)
+
+    @ui.button(label="Reprovar", style=discord.ButtonStyle.danger, emoji="🚫", custom_id="btn_reprovar")
+    async def btn_reprovar(self, interaction: discord.Interaction, button: ui.Button):
+        from extraction import rejeitar_aprovacao
+        await rejeitar_aprovacao(self.bot, interaction, self.guild_id, self.thread_id)
+
+# --- VIEW DE EXTRAÇÃO MANUAL ---
 class ExtractionChannelSelectView(BaseView):
     """Menu para selecionar qual canal conectado extrair"""
     def __init__(self, bot_instance, guild_id, connected_channels_ids):
@@ -65,13 +89,11 @@ class ExtractionChannelSelectView(BaseView):
                 label = f"#{ch.name}"[:25]
                 options.append(discord.SelectOption(label=label, value=str(cid), emoji="📂"))
             else:
-                # Canal deletado ou bot sem acesso, mas ainda na config
                 options.append(discord.SelectOption(label=f"ID: {cid} (Inválido)", value=str(cid), emoji="⚠️"))
         
         if not options:
             options.append(discord.SelectOption(label="Nenhum canal encontrado", value="none"))
 
-        # Limita a 25 opções (limite do discord)
         select = ui.Select(placeholder="Selecione o canal para extrair...", options=options[:25], min_values=1, max_values=1)
         select.callback = self.on_select
         self.add_item(select)
@@ -82,17 +104,14 @@ class ExtractionChannelSelectView(BaseView):
             await interaction.response.send_message("Nenhum canal válido.", ephemeral=True)
             return
 
-        # Importação tardia para evitar ciclo de importação
         from extraction import perform_extraction_guild
-        
-        await interaction.response.defer() # Mostra "pensando..."
+        await interaction.response.defer()
         
         ch = self.bot.get_channel(int(selected_id))
         if not ch:
-             await interaction.followup.send(f"❌ Erro: O canal ID {selected_id} não foi encontrado (pode ter sido deletado).", ephemeral=True)
+             await interaction.followup.send(f"❌ Erro: O canal ID {selected_id} não foi encontrado.", ephemeral=True)
              return
 
-        # Executa a extração APENAS para o canal alvo
         stats, zip_path = await perform_extraction_guild(self.bot, self.guild_id, target_channels=[ch])
         
         if zip_path:
@@ -102,7 +121,7 @@ class ExtractionChannelSelectView(BaseView):
         else:
             await interaction.followup.send(f"✅ **{ch.name}**: Nenhum tópico novo ou resolvido para extrair.")
 
-# --- SETUP INICIAL ---
+# --- SETUP INICIAL (ATUALIZADO) ---
 class PainelSetup(ui.View):
     def __init__(self, bot_instance, guild_id):
         super().__init__(timeout=None)
@@ -114,10 +133,11 @@ class PainelSetup(ui.View):
         self.selections = {
             "id_cargo_adm": my_cfg.get("id_cargo_adm"),
             "id_canal_comandos": my_cfg.get("id_canal_comandos"),
-            "id_canal_countdown": my_cfg.get("id_canal_countdown")
+            "id_canal_countdown": my_cfg.get("id_canal_countdown"),
+            "id_canal_aprovacao": my_cfg.get("id_canal_aprovacao") # Novo
         }
 
-    @ui.select(cls=ui.RoleSelect, placeholder="👑 Selecione o Cargo de ADMIN", min_values=1, max_values=1, row=0)
+    @ui.select(cls=ui.RoleSelect, placeholder="👑 Selecione o Cargo de ADMIN (Mestre)", min_values=1, max_values=1, row=0)
     async def select_adm(self, interaction: discord.Interaction, select: ui.RoleSelect):
         self.selections["id_cargo_adm"] = select.values[0].id
         await interaction.response.defer()
@@ -132,10 +152,15 @@ class PainelSetup(ui.View):
         self.selections["id_canal_countdown"] = select.values[0].id
         await interaction.response.defer()
 
-    @ui.button(label="Salvar Configuração", style=discord.ButtonStyle.success, emoji="💾", row=3)
+    @ui.select(cls=ui.ChannelSelect, placeholder="✅ Canal de Aprovações (Novo)", channel_types=[discord.ChannelType.text], min_values=1, max_values=1, row=3)
+    async def select_approval_channel(self, interaction: discord.Interaction, select: ui.ChannelSelect):
+        self.selections["id_canal_aprovacao"] = select.values[0].id
+        await interaction.response.defer()
+
+    @ui.button(label="Salvar Configuração", style=discord.ButtonStyle.success, emoji="💾", row=4)
     async def btn_save(self, interaction: discord.Interaction, button: ui.Button):
-        if not all(self.selections.values()):
-            await interaction.response.send_message("⚠️ Selecione todas as opções.", ephemeral=True)
+        if not all([self.selections["id_cargo_adm"], self.selections["id_canal_comandos"]]):
+            await interaction.response.send_message("⚠️ Admin e Canal de Comandos são obrigatórios.", ephemeral=True)
             return
 
         def update_logic(data):
@@ -147,10 +172,12 @@ class PainelSetup(ui.View):
         
         embed = discord.Embed(title="✅ Configuração Salva!", description="Bot configurado para este servidor.", color=0x2ecc71)
         embed.add_field(name="Cargo Admin", value=f"<@&{self.selections['id_cargo_adm']}>")
+        if self.selections["id_canal_aprovacao"]:
+             embed.add_field(name="Canal Aprovação", value=f"<#{self.selections['id_canal_aprovacao']}>")
         embed.set_footer(text="Agora use /painel")
         await interaction.response.edit_message(content=None, embed=embed, view=None)
 
-# --- VIEWS DE GERENCIAMENTO (EXCLUSÃO) ---
+# --- VIEWS DE GERENCIAMENTO ---
 class ExcluirOrgaoView(BaseSelectionView):
     def __init__(self, bot, guild_id):
         data = get_categories(guild_id)
@@ -217,7 +244,7 @@ class ExcluirCategoriaStep2View(BaseSelectionView):
             view=PainelGerenciamento(self.bot, self.guild_id)
         )
 
-# --- PAINEL DE GERENCIAMENTO (SUB-MENU) ---
+# --- PAINEL DE GERENCIAMENTO ---
 class PainelGerenciamento(BaseView):
     def __init__(self, bot_instance, guild_id):
         super().__init__(bot_instance)
@@ -226,7 +253,7 @@ class PainelGerenciamento(BaseView):
     @ui.button(label="Excluir Orgão", style=discord.ButtonStyle.danger, row=0, emoji="🏢")
     async def btn_del_orgao(self, interaction: discord.Interaction, button: ui.Button):
         view = ExcluirOrgaoView(self.bot, self.guild_id)
-        if len(view.children) < 2: # Se só tiver o botão cancelar
+        if len(view.children) < 2: 
             await interaction.response.send_message("⚠️ Não há orgãos para excluir.", ephemeral=True)
             return
         await interaction.response.edit_message(content="🗑️ **Excluir Orgão**", view=view, embed=None)
@@ -255,18 +282,17 @@ class PainelGerenciamento(BaseView):
             view=PainelPrincipal(self.bot, self.guild_id)
         )
 
-# --- PAINEL DE PERMISSÕES ---
+# --- PAINEL DE PERMISSÕES (ATUALIZADO) ---
 class PainelPermissoes(BaseView):
     PAGE_INFO = {
-        1: {"title": "🛡️ Permissões - Página 1/2", "keys": ["extracao_canal", "extracao_tudo"], "labels": ["📦 Extração Canal", "🌎 Extração Global"]},
-        2: {"title": "🛡️ Permissões - Página 2/2", "keys": ["resolvido", "reabrir"], "labels": ["✅ Finalizar Chamado", "🔓 Reabrir Chamado"]}
+        1: {"title": "🛡️ Permissões - Pag 1/2: Extração", "keys": ["extracao_canal", "extracao_tudo"], "labels": ["📦 Extração Manual", "🌎 Extração Global"]},
+        2: {"title": "🛡️ Permissões - Pag 2/2: Fluxo", "keys": ["resolvido", "reabrir", "aprovar"], "labels": ["✅ Solicitante (Quem resolve)", "🔓 Reabrir Chamado", "⚖️ Aprovador (Quem aceita)"]}
     }
 
     def __init__(self, bot_instance, guild_id):
         super().__init__(bot_instance)
         self.guild_id = str(guild_id)
         self.page = 1
-        # Carrega permissões atuais DESTE servidor
         self.temp_perms = get_config(self.guild_id).get("perms", {}).copy()
         self.update_components()
 
@@ -294,19 +320,19 @@ class PainelPermissoes(BaseView):
             self.add_item(select)
         
         if self.page > 1:
-            btn_prev = ui.Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary)
+            btn_prev = ui.Button(label="⬅️ Anterior", style=discord.ButtonStyle.secondary, row=4)
             btn_prev.callback = self._on_prev
             self.add_item(btn_prev)
         if self.page < 2:
-            btn_next = ui.Button(label="Próximo ➡️", style=discord.ButtonStyle.secondary)
+            btn_next = ui.Button(label="Próximo ➡️", style=discord.ButtonStyle.secondary, row=4)
             btn_next.callback = self._on_next
             self.add_item(btn_next)
         
-        btn_home = ui.Button(label="🏠 Voltar", style=discord.ButtonStyle.secondary)
+        btn_home = ui.Button(label="🏠 Voltar", style=discord.ButtonStyle.secondary, row=4)
         btn_home.callback = self._on_home
         self.add_item(btn_home)
         
-        btn_save = ui.Button(label="💾 Salvar", style=discord.ButtonStyle.success)
+        btn_save = ui.Button(label="💾 Salvar", style=discord.ButtonStyle.success, row=4)
         btn_save.callback = self._on_save
         self.add_item(btn_save)
 
@@ -367,6 +393,7 @@ class SeletorCanaisView(BaseView):
             antigos = data.get("connected_channels", {})
             novo_dict = {}
             for cid in novos:
+                # Preserva timestamp se já existia
                 novo_dict[cid] = antigos.get(cid, {"last_marker_timestamp": datetime.min.replace(tzinfo=BRT_OFFSET).isoformat()})
             data["connected_channels"] = novo_dict
             return data
@@ -437,7 +464,6 @@ class PainelResolucao(ui.View):
         self.selections = {"orgao": None, "categoria": None, "quem_tratou": None}
         self.add_orgao_select()
 
-    # --- PASSO 1: ORGÃO ---
     def add_orgao_select(self):
         self.clear_items()
         data = get_categories(self.guild_id)
@@ -465,7 +491,6 @@ class PainelResolucao(ui.View):
     async def btn_novo_orgao(self, interaction: discord.Interaction):
         await interaction.response.send_modal(NovoOrgaoModal(self))
 
-    # --- PASSO 2: CATEGORIA ---
     async def add_categoria_select(self, interaction: discord.Interaction):
         self.clear_items()
         data = get_categories(self.guild_id)
@@ -482,7 +507,6 @@ class PainelResolucao(ui.View):
         btn_novo.callback = self.btn_nova_cat
         self.add_item(btn_novo)
         
-        # Botões de navegação
         btn_back = ui.Button(label="Voltar", style=discord.ButtonStyle.secondary, row=2, emoji="⬅️")
         btn_back.callback = self.callback_voltar_orgao
         self.add_item(btn_back)
@@ -502,18 +526,14 @@ class PainelResolucao(ui.View):
         self.selections["categoria"] = interaction.data['values'][0]
         await self.add_equipe_select(interaction)
 
-    # --- PASSO 3: EQUIPE (Modificado para incluir Dev/Processos) ---
     async def add_equipe_select(self, interaction: discord.Interaction):
         self.clear_items()
         data = get_categories(self.guild_id)
         equipes = data.get("equipes", [])
         
-        # Garante que Dev e Processos estão na lista
         defaults = ["Dev", "Processos"]
         for d in defaults:
-            if d not in equipes:
-                equipes.append(d)
-        
+            if d not in equipes: equipes.append(d)
         equipes.sort()
         
         if equipes:
@@ -526,7 +546,6 @@ class PainelResolucao(ui.View):
         btn_novo.callback = self.btn_nova_equipe
         self.add_item(btn_novo)
         
-        # Botões de navegação
         btn_back = ui.Button(label="Voltar", style=discord.ButtonStyle.secondary, row=2, emoji="⬅️")
         btn_back.callback = self.callback_voltar_categoria
         self.add_item(btn_back)
@@ -546,7 +565,6 @@ class PainelResolucao(ui.View):
         self.selections["quem_tratou"] = interaction.data['values'][0]
         await self.finalizar_processo(interaction)
 
-    # --- CALLBACKS DE NAVEGAÇÃO ---
     async def callback_cancelar(self, interaction: discord.Interaction):
         await interaction.response.edit_message(content="🚫 Processo cancelado.", view=None)
 
@@ -555,9 +573,7 @@ class PainelResolucao(ui.View):
         await interaction.response.edit_message(content="📂 Selecione o Orgão:", view=self)
 
     async def callback_voltar_categoria(self, interaction: discord.Interaction):
-        # Para voltar para categoria, precisamos resetar a seleção dela
         self.selections["categoria"] = None
-        # E reexibir o menu de categorias baseado no orgão já selecionado
         await self.add_categoria_select(interaction)
 
     async def finalizar_processo(self, interaction: discord.Interaction):
@@ -566,11 +582,10 @@ class PainelResolucao(ui.View):
 
 # --- PAINEL PRINCIPAL (HOME) ---
 class PainelPrincipal(BaseView):
-    """Tela principal com todos os botões (restaurados)"""
     def __init__(self, bot_instance, guild_id):
         super().__init__(bot_instance)
         self.guild_id = str(guild_id)
-        self.last_backup_click = 0 # Controle de cooldown local para o botão
+        self.last_backup_click = 0 
     
     @ui.button(label="Canais", style=discord.ButtonStyle.secondary, row=0, emoji="📡")
     async def btn_canais(self, interaction: discord.Interaction, button: ui.Button):
@@ -590,11 +605,10 @@ class PainelPrincipal(BaseView):
 
     @ui.button(label="Forçar Backup", style=discord.ButtonStyle.primary, row=1, emoji="💾")
     async def btn_backup(self, interaction: discord.Interaction, button: ui.Button):
-        # Importa aqui para evitar ciclo
         from extraction import perform_extraction_guild
         
         now = datetime.now().timestamp()
-        if now - self.last_backup_click < 30: # 5 minutos cooldown
+        if now - self.last_backup_click < 30:
             await interaction.response.send_message(f"⏳ Aguarde {int(30-(now-self.last_backup_click))}s.", ephemeral=True)
             return
             

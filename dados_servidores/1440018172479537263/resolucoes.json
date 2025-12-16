@@ -1,0 +1,29 @@
+[
+    {
+        "data": "2025-12-16T13:36:22.069938-03:00",
+        "thread_id": "1447602056276738281",
+        "thread_nome": "abert",
+        "resolvido_por": "Dev",
+        "resolvido_por_id": "1397639294088384623",
+        "orgao": "aa",
+        "categoria": "bb"
+    },
+    {
+        "data": "2025-12-16T13:46:36.179987-03:00",
+        "thread_id": "1440034244083716126",
+        "thread_nome": "parte 3",
+        "resolvido_por": "Dev",
+        "resolvido_por_id": "1397639294088384623",
+        "orgao": "aa",
+        "categoria": "bb"
+    },
+    {
+        "data": "2025-12-16T15:10:09.268873-03:00",
+        "thread_id": "1440032637740781640",
+        "thread_nome": "OK - parte 2",
+        "resolvido_por": "Dev",
+        "resolvido_por_id": "1397639294088384623",
+        "orgao": "aa",
+        "categoria": "bb"
+    }
+]

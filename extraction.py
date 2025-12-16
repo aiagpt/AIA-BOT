@@ -1,6 +1,6 @@
 """
 extraction.py - Motor de extração adaptado para Multi-Server (Guild Sharding)
-Atualizado: Aplica "OK" imediato, delete_after=30s e lógica de rejeição sem extração.
+Atualizado: Remove data do formato TOON e usa clean_content para menções.
 """
 import discord
 from discord.ext import commands, tasks
@@ -296,7 +296,8 @@ class ExtractionEngine:
     def gerar_texto_toon(contexto: dict, mensagens: list) -> str:
         lines = ["contexto:"] + [f"  {k}: {v}" for k, v in contexto.items()]
         if mensagens:
-            lines.append(f"mensagens[{len(mensagens)}]{{data,autor,mensagem}}:")
+            # Modificado: Retirada a tag 'data' do cabeçalho
+            lines.append(f"mensagens[{len(mensagens)}]{{autor,mensagem}}:")
             for m in mensagens:
                 txt = m['conteudo'].replace('\n', ' ')
                 anexos_formatados = []
@@ -306,7 +307,8 @@ class ExtractionEngine:
                     anexos_formatados.append(f"[{tag}: {a}]")
                 anexos_str = " ".join(anexos_formatados)
                 full = f"{txt} {anexos_str}".strip()
-                lines.append(f"  {m['timestamp_brt']}, {m['autor']['nome']}, {full}")
+                # Modificado: Retirado m['timestamp_brt'] da string final
+                lines.append(f"  {m['autor']['nome']}, {full}")
         return "\n".join(lines)
 
     @staticmethod
@@ -336,10 +338,14 @@ class ExtractionEngine:
         async for m in thread.history(limit=None, oldest_first=True):
             if m.author.id == bot.user.id: continue
             paths_or_links = [a.url for a in m.attachments] if m.attachments else []
+            
+            # Modificado: Usando clean_content para substituir menções por nomes (@Pessoa)
+            conteudo_limpo = m.clean_content
+
             msgs.append({
                 "timestamp_brt": m.created_at.astimezone(BRT_OFFSET).strftime("%Y-%m-%d %H:%M:%S"),
-                "autor": {"nome": m.author.name},
-                "conteudo": m.content,
+                "autor": {"nome": m.author.display_name}, # Modificado: Usando display_name para ser mais amigável
+                "conteudo": conteudo_limpo,
                 "anexos": paths_or_links
             })
 
